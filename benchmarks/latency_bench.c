@@ -14,7 +14,7 @@
 
 #define QUEUE_NAME "/nabd_bench"
 #define WARMUP_MSGS 1000
-#define BENCH_MSGS 100000
+#define BENCH_MSGS 5000000
 #define MSG_SIZE 64
 
 /* Get time in nanoseconds */
@@ -25,6 +25,7 @@ static inline uint64_t get_nanos(void) {
 }
 
 int main(int argc, char *argv[]) {
+  setvbuf(stdout, NULL, _IONBF, 0); /* Disable buffering */
   printf("NABD Latency/Throughput Benchmark\n");
   printf("==================================\n\n");
 
@@ -41,6 +42,9 @@ int main(int argc, char *argv[]) {
   printf("  Message size: %d bytes\n", msg_size);
   printf("\n");
 
+  /* Ensure clean state */
+  nabd_unlink(QUEUE_NAME);
+
   /* Create queue */
   nabd_t *q =
       nabd_open(QUEUE_NAME, 8192, msg_size + 64, NABD_CREATE | NABD_PRODUCER);
@@ -48,12 +52,14 @@ int main(int argc, char *argv[]) {
     perror("nabd_open");
     return 1;
   }
+  printf("Queue created.\n");
 
   /* Fork consumer */
   pid_t pid = fork();
 
   if (pid == 0) {
     /* Child: Consumer */
+    printf("Consumer starting...\n");
     nabd_close(q);
 
     nabd_t *cq = nabd_open(QUEUE_NAME, 0, 0, NABD_CONSUMER);
@@ -61,12 +67,14 @@ int main(int argc, char *argv[]) {
       perror("consumer: nabd_open");
       exit(1);
     }
+    printf("Consumer joined.\n");
 
     char buf[4096];
     size_t len;
     int received = 0;
 
-    while (received < msg_count) {
+    /* First consumer only reads warmup messages */
+    while (received < WARMUP_MSGS) {
       len = sizeof(buf);
       int ret = nabd_pop(cq, buf, &len);
 

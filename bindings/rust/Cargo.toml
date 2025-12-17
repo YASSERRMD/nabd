@@ -1,0 +1,9 @@
+[package]
+name = "nabd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# No external deps needed
+
+[build-dependencies]
