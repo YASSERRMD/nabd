@@ -34,9 +34,13 @@ EXAMPLES = $(BUILD_DIR)/simple_producer $(BUILD_DIR)/simple_consumer
 # Benchmarks
 BENCHMARKS = $(BUILD_DIR)/latency_bench
 
-.PHONY: all clean examples bench test
+# Tests
+TESTS_DIR = tests
+TESTS = $(BUILD_DIR)/test_api $(BUILD_DIR)/test_concurrent
 
-all: $(LIB) examples bench
+.PHONY: all clean examples bench test run-test
+
+all: $(LIB) examples bench tests
 
 # Create build directory
 $(BUILD_DIR):
@@ -75,6 +79,22 @@ run-consumer: $(BUILD_DIR)/simple_consumer
 # Run benchmark
 run-bench: $(BUILD_DIR)/latency_bench
 	./$(BUILD_DIR)/latency_bench
+
+# Tests
+tests: $(TESTS)
+
+$(BUILD_DIR)/test_api: $(TESTS_DIR)/test_api.c $(LIB)
+	$(CC) $(CFLAGS) -I$(INC_DIR) $< $(LIB) $(LDFLAGS) -o $@
+
+$(BUILD_DIR)/test_concurrent: $(TESTS_DIR)/test_concurrent.c $(LIB)
+	$(CC) $(CFLAGS) -I$(INC_DIR) $< $(LIB) $(LDFLAGS) -o $@
+
+# Run tests
+run-test: tests
+	./$(BUILD_DIR)/test_api
+	./$(BUILD_DIR)/test_concurrent
+
+test: run-test
 
 # Clean
 clean:
