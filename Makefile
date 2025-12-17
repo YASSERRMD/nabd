@@ -4,7 +4,7 @@
 # Licensed under MIT License
 
 CC = gcc
-CFLAGS = -std=c11 -Wall -Wextra -O2 -D_GNU_SOURCE
+CFLAGS = -std=c11 -Wall -Wextra -O2 -D_GNU_SOURCE -fPIC
 
 # macOS doesn't need/have -lrt, Linux does
 UNAME_S := $(shell uname -s)
@@ -27,6 +27,7 @@ OBJS = $(SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
 # Library
 LIB = $(BUILD_DIR)/libnabd.a
+SO_LIB = $(BUILD_DIR)/libnabd.so
 
 # Examples
 EXAMPLES = $(BUILD_DIR)/simple_producer $(BUILD_DIR)/simple_consumer
@@ -40,7 +41,7 @@ TESTS = $(BUILD_DIR)/test_api $(BUILD_DIR)/test_concurrent
 
 .PHONY: all clean examples bench test run-test
 
-all: $(LIB) examples bench tests
+all: $(LIB) $(SO_LIB) examples bench tests
 
 # Create build directory
 $(BUILD_DIR):
@@ -53,6 +54,10 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 # Create static library
 $(LIB): $(OBJS)
 	ar rcs $@ $^
+
+# Create shared library
+$(SO_LIB): $(OBJS)
+	$(CC) -shared -o $@ $^ $(LDFLAGS)
 
 # Examples
 examples: $(EXAMPLES)
