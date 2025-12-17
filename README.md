@@ -1,5 +1,9 @@
 # NABD - Not A Broker Daemon
 
+<p align="center">
+  <img src="assets/logo.png" alt="NABD Logo" width="300"/>
+</p>
+
 **NABD** is a high-performance, lock-free, zero-copy shared memory IPC primitive for modern systems. It allows processes to communicate with ultra-low latency (< 100ns) on a single node without the overhead of sockets, syscalls in the hot path, or serialization.
 
 ## Key Features
