@@ -1,14 +1,14 @@
 /*
  * NABD - High-Performance Shared Memory IPC
  *
- * Core Implementation
+ * Core Implementation (Optimized)
  *
  * Copyright (c) 2025 Mohamed Yasser
  * Licensed under MIT License
  */
 
-#define _GNU_SOURCE
 #include "../include/nabd/nabd.h"
+#include "../include/nabd/internal.h"
 #include "../include/nabd/types.h"
 
 #include <errno.h>
@@ -41,43 +41,23 @@ struct nabd {
 };
 
 /*
- * Helper: Check if n is a power of 2
+ * Helper: Get slot pointer by index (hot path - force inline)
  */
-static inline int is_power_of_2(size_t n) { return n && !(n & (n - 1)); }
-
-/*
- * Helper: Round up to next power of 2
- */
-static inline size_t next_power_of_2(size_t n) {
-  n--;
-  n |= n >> 1;
-  n |= n >> 2;
-  n |= n >> 4;
-  n |= n >> 8;
-  n |= n >> 16;
-  n |= n >> 32;
-  n++;
-  return n;
-}
-
-/*
- * Helper: Get slot pointer by index
- */
-static inline void *get_slot(nabd_t *q, uint64_t index) {
-  return q->buffer + (index & q->mask) * q->slot_size;
+NABD_INLINE void *get_slot(nabd_t *q, uint64_t index) {
+  return q->buffer + nabd_mod_pow2(index, q->mask) * q->slot_size;
 }
 
 /*
  * Helper: Get slot header
  */
-static inline nabd_slot_header_t *get_slot_header(nabd_t *q, uint64_t index) {
+NABD_INLINE nabd_slot_header_t *get_slot_header(nabd_t *q, uint64_t index) {
   return (nabd_slot_header_t *)get_slot(q, index);
 }
 
 /*
  * Helper: Get slot payload
  */
-static inline void *get_slot_payload(nabd_t *q, uint64_t index) {
+NABD_INLINE void *get_slot_payload(nabd_t *q, uint64_t index) {
   return (uint8_t *)get_slot(q, index) + sizeof(nabd_slot_header_t);
 }
 
@@ -109,8 +89,8 @@ nabd_t *nabd_open(const char *name, size_t capacity, size_t slot_size,
       slot_size = NABD_DEFAULT_SLOT_SIZE;
 
     /* Ensure power of 2 for capacity */
-    if (!is_power_of_2(capacity)) {
-      capacity = next_power_of_2(capacity);
+    if (NABD_UNLIKELY(!nabd_is_power_of_2(capacity))) {
+      capacity = nabd_next_power_of_2(capacity);
     }
 
     /* Minimum slot size */
@@ -280,68 +260,82 @@ int nabd_unlink(const char *name) {
 }
 
 /*
- * Push a message (non-blocking)
+ * Push a message (non-blocking) - HOT PATH
  */
 int nabd_push(nabd_t *q, const void *data, size_t len) {
-  if (!q || !data)
+  if (NABD_UNLIKELY(!q || !data))
     return NABD_INVALID;
 
   size_t max_payload = q->slot_size - sizeof(nabd_slot_header_t);
-  if (len > max_payload)
+  if (NABD_UNLIKELY(len > max_payload))
     return NABD_TOOBIG;
 
-  /* Load head (our position) */
-  uint64_t head = atomic_load_explicit(&q->ctrl->head, memory_order_relaxed);
+  /* Load head (our position) - relaxed ok, it's our variable */
+  uint64_t head = NABD_LOAD_RELAXED(&q->ctrl->head);
 
   /* Load tail (consumer position) with acquire to sync */
-  uint64_t tail = atomic_load_explicit(&q->ctrl->tail, memory_order_acquire);
+  uint64_t tail = NABD_LOAD_ACQUIRE(&q->ctrl->tail);
 
   /* Check if full */
-  if (head - tail >= q->capacity) {
+  if (NABD_UNLIKELY(head - tail >= q->capacity)) {
     return NABD_FULL;
   }
 
-  /* Get slot and write data */
-  nabd_slot_header_t *hdr = get_slot_header(q, head);
-  void *payload = get_slot_payload(q, head);
+  /* Get slot and prefetch for writing */
+  void *slot = get_slot(q, head);
+  NABD_PREFETCH_WRITE(slot);
 
+  nabd_slot_header_t *hdr = (nabd_slot_header_t *)slot;
+  void *payload = (uint8_t *)slot + sizeof(nabd_slot_header_t);
+
+  /* Copy data */
   memcpy(payload, data, len);
+
+  /* Fill header */
   hdr->length = (uint16_t)len;
   hdr->flags = 0;
   hdr->sequence = (uint32_t)head;
 
   /* Publish: release store to head */
-  atomic_store_explicit(&q->ctrl->head, head + 1, memory_order_release);
+  NABD_STORE_RELEASE(&q->ctrl->head, head + 1);
 
   return NABD_OK;
 }
 
 /*
- * Pop a message (non-blocking)
+ * Pop a message (non-blocking) - HOT PATH
  */
 int nabd_pop(nabd_t *q, void *buf, size_t *len) {
-  if (!q || !buf || !len)
+  if (NABD_UNLIKELY(!q || !buf || !len))
     return NABD_INVALID;
 
-  /* Load tail (our position) */
-  uint64_t tail = atomic_load_explicit(&q->ctrl->tail, memory_order_relaxed);
+  /* Load tail (our position) - relaxed ok, it's our variable */
+  uint64_t tail = NABD_LOAD_RELAXED(&q->ctrl->tail);
 
   /* Load head (producer position) with acquire to see data */
-  uint64_t head = atomic_load_explicit(&q->ctrl->head, memory_order_acquire);
+  uint64_t head = NABD_LOAD_ACQUIRE(&q->ctrl->head);
 
   /* Check if empty */
-  if (tail == head) {
+  if (NABD_UNLIKELY(tail == head)) {
     return NABD_EMPTY;
   }
 
-  /* Get slot and read data */
-  nabd_slot_header_t *hdr = get_slot_header(q, tail);
-  void *payload = get_slot_payload(q, tail);
+  /* Get slot and prefetch for reading */
+  void *slot = get_slot(q, tail);
+  NABD_PREFETCH_READ(slot);
+
+  /* Also prefetch next slot for speculative read */
+  if (NABD_LIKELY(tail + 1 < head)) {
+    NABD_PREFETCH_READ(get_slot(q, tail + 1));
+  }
+
+  nabd_slot_header_t *hdr = (nabd_slot_header_t *)slot;
+  void *payload = (uint8_t *)slot + sizeof(nabd_slot_header_t);
 
   size_t msg_len = hdr->length;
 
   /* Check buffer size */
-  if (msg_len > *len) {
+  if (NABD_UNLIKELY(msg_len > *len)) {
     *len = msg_len;
     return NABD_TOOBIG;
   }
@@ -350,7 +344,7 @@ int nabd_pop(nabd_t *q, void *buf, size_t *len) {
   *len = msg_len;
 
   /* Signal consumption: release store to tail */
-  atomic_store_explicit(&q->ctrl->tail, tail + 1, memory_order_release);
+  NABD_STORE_RELEASE(&q->ctrl->tail, tail + 1);
 
   return NABD_OK;
 }
