@@ -126,14 +126,67 @@ _Static_assert(offsetof(nabd_control_t, tail) % NABD_CACHE_LINE_SIZE == 0,
 typedef struct nabd nabd_t;
 
 /*
+ * ============================================================================
+ * Multi-Consumer Support
+ * ============================================================================
+ */
+
+/*
+ * Maximum number of consumer groups
+ * Each group has independent tail offset for independent consumption
+ */
+#define NABD_MAX_CONSUMERS 16
+
+/*
+ * Consumer group info - stored in shared memory
+ * Each consumer group has its own tail offset
+ */
+typedef struct {
+  alignas(NABD_CACHE_LINE_SIZE) _Atomic uint64_t
+      tail;                /* This group's read position */
+  _Atomic uint32_t active; /* 1 if active, 0 if available */
+  uint32_t group_id;       /* Group identifier */
+  uint64_t pad[6];         /* Padding to cache line */
+} nabd_consumer_group_t;
+
+_Static_assert(sizeof(nabd_consumer_group_t) == NABD_CACHE_LINE_SIZE,
+               "Consumer group must be cache-line sized");
+
+/*
+ * Multi-consumer control block extension
+ * Placed after the ring buffer in shared memory
+ */
+typedef struct {
+  uint64_t magic;      /* Magic for validation */
+  uint64_t num_groups; /* Number of allocated groups */
+  uint64_t pad[6];     /* Padding */
+  nabd_consumer_group_t groups[NABD_MAX_CONSUMERS];
+} nabd_multi_consumer_t;
+
+/*
+ * Consumer handle for multi-consumer mode
+ */
+typedef struct nabd_consumer nabd_consumer_t;
+
+/*
  * Statistics structure for monitoring
  */
 typedef struct {
   uint64_t head;      /* Current head position */
-  uint64_t tail;      /* Current tail position */
+  uint64_t tail;      /* Current tail position (or min tail for multi) */
   uint64_t capacity;  /* Total slots */
   uint64_t used;      /* Slots currently in use */
   uint64_t slot_size; /* Bytes per slot */
 } nabd_stats_t;
+
+/*
+ * Consumer group statistics
+ */
+typedef struct {
+  uint32_t group_id; /* Group identifier */
+  uint32_t active;   /* Is group active */
+  uint64_t tail;     /* Group's tail position */
+  uint64_t lag;      /* Messages behind head */
+} nabd_consumer_stats_t;
 
 #endif /* NABD_TYPES_H */

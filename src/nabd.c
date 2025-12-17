@@ -38,6 +38,18 @@ struct nabd {
   /* Zero-copy state */
   int reserved;         /* Whether a slot is reserved */
   uint64_t reserve_pos; /* Reserved slot position */
+
+  /* Multi-consumer extension (NULL if not used) */
+  nabd_multi_consumer_t *multi; /* Multi-consumer control block */
+};
+
+/*
+ * Internal consumer handle structure
+ */
+struct nabd_consumer {
+  nabd_t *queue;                /* Parent queue */
+  nabd_consumer_group_t *group; /* Consumer group in shared memory */
+  uint32_t group_id;            /* Group identifier */
 };
 
 /*
@@ -504,4 +516,245 @@ const char *nabd_strerror(int err) {
   default:
     return "Unknown error";
   }
+}
+
+/*
+ * ============================================================================
+ * Multi-Consumer Support Implementation
+ * ============================================================================
+ */
+
+#define NABD_MULTI_MAGIC 0x4D4C544E55425444ULL /* "NABDMULTI" */
+
+/*
+ * Create a consumer group
+ */
+nabd_consumer_t *nabd_consumer_create(nabd_t *q, uint32_t group_id) {
+  if (NABD_UNLIKELY(!q))
+    return NULL;
+
+  /* Find an available group slot */
+  nabd_multi_consumer_t *multi = q->multi;
+  if (!multi) {
+    /* No multi-consumer support initialized */
+    errno = EINVAL;
+    return NULL;
+  }
+
+  nabd_consumer_group_t *group = NULL;
+  uint32_t assigned_id = group_id;
+
+  for (int i = 0; i < NABD_MAX_CONSUMERS; i++) {
+    uint32_t expected = 0;
+    if (NABD_CAS_ACQ_REL(&multi->groups[i].active, &expected, 1)) {
+      /* Successfully claimed this slot */
+      group = &multi->groups[i];
+      assigned_id = (group_id != 0) ? group_id : (uint32_t)(i + 1);
+      group->group_id = assigned_id;
+
+      /* Initialize tail to current head (start from now) */
+      uint64_t head = NABD_LOAD_ACQUIRE(&q->ctrl->head);
+      NABD_STORE_RELEASE(&group->tail, head);
+      break;
+    }
+  }
+
+  if (!group) {
+    errno = ENOMEM; /* No slots available */
+    return NULL;
+  }
+
+  /* Allocate consumer handle */
+  nabd_consumer_t *c = calloc(1, sizeof(nabd_consumer_t));
+  if (!c) {
+    NABD_STORE_RELEASE(&group->active, 0); /* Release slot */
+    return NULL;
+  }
+
+  c->queue = q;
+  c->group = group;
+  c->group_id = assigned_id;
+
+  return c;
+}
+
+/*
+ * Join an existing consumer group
+ */
+nabd_consumer_t *nabd_consumer_join(nabd_t *q, uint32_t group_id) {
+  if (NABD_UNLIKELY(!q || group_id == 0))
+    return NULL;
+
+  nabd_multi_consumer_t *multi = q->multi;
+  if (!multi) {
+    errno = EINVAL;
+    return NULL;
+  }
+
+  /* Find the group by ID */
+  nabd_consumer_group_t *group = NULL;
+  for (int i = 0; i < NABD_MAX_CONSUMERS; i++) {
+    if (NABD_LOAD_ACQUIRE(&multi->groups[i].active) &&
+        multi->groups[i].group_id == group_id) {
+      group = &multi->groups[i];
+      break;
+    }
+  }
+
+  if (!group) {
+    errno = ENOENT;
+    return NULL;
+  }
+
+  /* Allocate consumer handle */
+  nabd_consumer_t *c = calloc(1, sizeof(nabd_consumer_t));
+  if (!c)
+    return NULL;
+
+  c->queue = q;
+  c->group = group;
+  c->group_id = group_id;
+
+  return c;
+}
+
+/*
+ * Close a consumer handle
+ */
+int nabd_consumer_close(nabd_consumer_t *c) {
+  if (!c)
+    return NABD_INVALID;
+
+  /* Don't deactivate the group - other consumers may be using it */
+  free(c);
+  return NABD_OK;
+}
+
+/*
+ * Pop a message for this consumer group
+ */
+int nabd_consumer_pop(nabd_consumer_t *c, void *buf, size_t *len) {
+  if (NABD_UNLIKELY(!c || !buf || !len))
+    return NABD_INVALID;
+
+  nabd_t *q = c->queue;
+  nabd_consumer_group_t *group = c->group;
+
+  /* Load our tail position */
+  uint64_t tail = NABD_LOAD_RELAXED(&group->tail);
+
+  /* Load head with acquire to see producer's data */
+  uint64_t head = NABD_LOAD_ACQUIRE(&q->ctrl->head);
+
+  /* Check if empty for this group */
+  if (NABD_UNLIKELY(tail >= head)) {
+    return NABD_EMPTY;
+  }
+
+  /* Get slot and prefetch */
+  void *slot = get_slot(q, tail);
+  NABD_PREFETCH_READ(slot);
+
+  nabd_slot_header_t *hdr = (nabd_slot_header_t *)slot;
+  void *payload = (uint8_t *)slot + sizeof(nabd_slot_header_t);
+
+  size_t msg_len = hdr->length;
+
+  if (NABD_UNLIKELY(msg_len > *len)) {
+    *len = msg_len;
+    return NABD_TOOBIG;
+  }
+
+  memcpy(buf, payload, msg_len);
+  *len = msg_len;
+
+  /* Advance this group's tail */
+  NABD_STORE_RELEASE(&group->tail, tail + 1);
+
+  return NABD_OK;
+}
+
+/*
+ * Peek at next message for this consumer group
+ */
+int nabd_consumer_peek(nabd_consumer_t *c, const void **data, size_t *len) {
+  if (NABD_UNLIKELY(!c || !data || !len))
+    return NABD_INVALID;
+
+  nabd_t *q = c->queue;
+  nabd_consumer_group_t *group = c->group;
+
+  uint64_t tail = NABD_LOAD_RELAXED(&group->tail);
+  uint64_t head = NABD_LOAD_ACQUIRE(&q->ctrl->head);
+
+  if (NABD_UNLIKELY(tail >= head)) {
+    return NABD_EMPTY;
+  }
+
+  nabd_slot_header_t *hdr = get_slot_header(q, tail);
+  *data = get_slot_payload(q, tail);
+  *len = hdr->length;
+
+  return NABD_OK;
+}
+
+/*
+ * Release a peeked message for this consumer group
+ */
+int nabd_consumer_release(nabd_consumer_t *c) {
+  if (!c)
+    return NABD_INVALID;
+
+  uint64_t tail = NABD_LOAD_RELAXED(&c->group->tail);
+  NABD_STORE_RELEASE(&c->group->tail, tail + 1);
+
+  return NABD_OK;
+}
+
+/*
+ * Get consumer group statistics
+ */
+int nabd_consumer_stats(nabd_consumer_t *c, nabd_consumer_stats_t *stats) {
+  if (!c || !stats)
+    return NABD_INVALID;
+
+  nabd_t *q = c->queue;
+  uint64_t head = NABD_LOAD_RELAXED(&q->ctrl->head);
+  uint64_t tail = NABD_LOAD_RELAXED(&c->group->tail);
+
+  stats->group_id = c->group_id;
+  stats->active = NABD_LOAD_RELAXED(&c->group->active);
+  stats->tail = tail;
+  stats->lag = (head > tail) ? (head - tail) : 0;
+
+  return NABD_OK;
+}
+
+/*
+ * Get minimum tail across all consumer groups
+ * This determines how far back the buffer must retain data
+ */
+uint64_t nabd_min_tail(nabd_t *q) {
+  if (!q || !q->multi) {
+    return NABD_LOAD_RELAXED(&q->ctrl->tail);
+  }
+
+  uint64_t min_tail = UINT64_MAX;
+  nabd_multi_consumer_t *multi = q->multi;
+
+  for (int i = 0; i < NABD_MAX_CONSUMERS; i++) {
+    if (NABD_LOAD_RELAXED(&multi->groups[i].active)) {
+      uint64_t tail = NABD_LOAD_RELAXED(&multi->groups[i].tail);
+      if (tail < min_tail) {
+        min_tail = tail;
+      }
+    }
+  }
+
+  /* If no consumer groups active, fall back to single consumer tail */
+  if (min_tail == UINT64_MAX) {
+    min_tail = NABD_LOAD_RELAXED(&q->ctrl->tail);
+  }
+
+  return min_tail;
 }
