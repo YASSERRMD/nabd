@@ -96,6 +96,20 @@ run-test: tests
 
 test: run-test
 
+# Install
+PREFIX ?= /usr/local
+install: $(LIB)
+	@echo "Installing to $(PREFIX)..."
+	mkdir -p $(PREFIX)/lib
+	mkdir -p $(PREFIX)/include/nabd
+	cp $(LIB) $(PREFIX)/lib/
+	cp include/nabd/*.h $(PREFIX)/include/nabd/
+
+uninstall:
+	@echo "Uninstalling from $(PREFIX)..."
+	rm -f $(PREFIX)/lib/libnabd.a
+	rm -rf $(PREFIX)/include/nabd
+
 # Clean
 clean:
 	rm -rf $(BUILD_DIR)
