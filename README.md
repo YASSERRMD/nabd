@@ -12,6 +12,7 @@
 - **📦 Persistence**: Consumer offset checkpointing for crash recovery and restartability.
 - **🔭 Observability**: Built-in metrics for fill level, throughput, and deep diagnostics.
 - **🛑 Backpressure**: Configurable flow control with buffer-full callbacks and exponential backoff.
+- **🌍 Ecosystem**: First-class bindings for Python, Go, and Rust.
 
 ## Quick Start
 
@@ -92,13 +93,33 @@ nabd_consumer_pop(c, buf, &len);
 
 ## Performance
 
-On a modern MacBook M1/M2/M3:
-- **Latency**: ~80-120 ns per message
-- **Throughput**: > 5 Million msgs/sec (dependent on payload size)
+On a MacBook Air M4 (2024):
+- **Latency**: ~45 ns per message
+- **Throughput**: > 22 Million msgs/sec (64-byte payload)
+- **Bandwidth**: > 1.3 GB/s
 
 Run the benchmark:
 ```bash
 make run-bench
+```
+
+## Language Bindings
+
+NABD includes bindings for popular languages in `bindings/`.
+
+### Python
+```bash
+python3 bindings/python/nabd.py
+```
+
+### Go
+```bash
+cd bindings/go && go test -v
+```
+
+### Rust
+```bash
+cd bindings/rust && cargo test
 ```
 
 ## License
