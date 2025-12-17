@@ -198,6 +198,99 @@ int nabd_full(nabd_t *q);
  */
 const char *nabd_strerror(int err);
 
+/*
+ * ============================================================================
+ * Multi-Consumer Functions
+ * ============================================================================
+ */
+
+/**
+ * Create a consumer group
+ *
+ * @param q         Handle from nabd_open
+ * @param group_id  Optional group ID (0 for auto-assign)
+ *
+ * @return Consumer handle on success, NULL on failure
+ *
+ * Note: Each consumer group has its own independent tail offset.
+ *       Messages are not removed until ALL consumer groups have read them.
+ */
+nabd_consumer_t *nabd_consumer_create(nabd_t *q, uint32_t group_id);
+
+/**
+ * Join an existing consumer group
+ *
+ * @param q         Handle from nabd_open
+ * @param group_id  Group ID to join
+ *
+ * @return Consumer handle on success, NULL on failure
+ *
+ * Note: Multiple processes can join the same group to share consumption.
+ */
+nabd_consumer_t *nabd_consumer_join(nabd_t *q, uint32_t group_id);
+
+/**
+ * Close a consumer handle
+ *
+ * @param c  Consumer handle
+ *
+ * @return NABD_OK on success
+ */
+int nabd_consumer_close(nabd_consumer_t *c);
+
+/**
+ * Pop a message for this consumer group (non-blocking)
+ *
+ * @param c     Consumer handle
+ * @param buf   Buffer to copy message into
+ * @param len   In: buffer capacity, Out: actual message length
+ *
+ * @return NABD_OK on success
+ *         NABD_EMPTY if no new messages for this group
+ *         NABD_TOOBIG if message exceeds buffer capacity
+ */
+int nabd_consumer_pop(nabd_consumer_t *c, void *buf, size_t *len);
+
+/**
+ * Peek at next message for this consumer group
+ *
+ * @param c     Consumer handle
+ * @param data  Output: pointer to message data (read-only!)
+ * @param len   Output: message length
+ *
+ * @return NABD_OK on success
+ *         NABD_EMPTY if no new messages
+ */
+int nabd_consumer_peek(nabd_consumer_t *c, const void **data, size_t *len);
+
+/**
+ * Release a peeked message for this consumer group
+ *
+ * @param c  Consumer handle
+ *
+ * @return NABD_OK on success
+ */
+int nabd_consumer_release(nabd_consumer_t *c);
+
+/**
+ * Get consumer group statistics
+ *
+ * @param c      Consumer handle
+ * @param stats  Output: consumer statistics
+ *
+ * @return NABD_OK on success
+ */
+int nabd_consumer_stats(nabd_consumer_t *c, nabd_consumer_stats_t *stats);
+
+/**
+ * Get minimum tail across all consumer groups
+ *
+ * @param q  Handle from nabd_open
+ *
+ * @return Minimum tail position (used to determine safe buffer cleanup)
+ */
+uint64_t nabd_min_tail(nabd_t *q);
+
 #ifdef __cplusplus
 }
 #endif
